@@ -7,9 +7,7 @@ const LOCAL_STORAGE_KEY = "MasterListSPA.db.v1";
 const LOCAL_STORAGE_META_KEY = "MasterListSPA.meta.v1";
 const el = (id) => document.getElementById(id);
 
-let ui;
-function bindUI(){
-  ui = {
+const ui = {
   globalStatus: el("globalStatus"),
   btnImport: el("btnImport"),
   btnExport: el("btnExport"),
@@ -40,9 +38,7 @@ function bindUI(){
 
   // Report
   text_area1: el("text_area1"),
-  };
-}
-
+};
 
 let db = null;
 let loadedFileName = null;
@@ -74,7 +70,7 @@ function setGlobalStatus(){
   if (!db) { ui.globalStatus.textContent = "No file loaded."; ui.btnExport.disabled = true; return; }
   ui.btnExport.disabled = false;
   const filePart = loadedFileName ? `Loaded: ${loadedFileName}` : "Working set (not imported)";
-  ui.globalStatus.textContent = `${filePart} | v${db.version} | updated ${db.updatedAt} | categories ${db.categories.length}`;
+  ui.globalStatus.textContent = `${filePart} | v${db.version} | updated ${db.updatedAt} | categories ${db.categories.length} | autosave on`;
 }
 
 function setText(id, value){ el(id).value = value; }
@@ -101,7 +97,10 @@ function saveToLocalStorage(){
       loadedFileName: loadedFileName || null
     }));
   }catch(e){
-    // Ignore, but keep app running.
+    // Storage can fail (private mode, quota). We do not hard-fail the app.
+    try{
+      ui.AddListOutput.value = (ui.AddListOutput.value || "") + " (autosave failed)";
+    }catch(_e){}
   }
 }
 
@@ -114,11 +113,19 @@ function loadFromLocalStorage(){
     if (err) return null;
     const metaRaw = localStorage.getItem(LOCAL_STORAGE_META_KEY);
     const meta = metaRaw ? JSON.parse(metaRaw) : null;
-    return { db: candidate, meta };
+    return { db: candidate, meta: meta };
   }catch(e){
     return null;
   }
 }
+
+function clearLocalStorage(){
+  try{
+    localStorage.removeItem(LOCAL_STORAGE_KEY);
+    localStorage.removeItem(LOCAL_STORAGE_META_KEY);
+  }catch(e){}
+}
+
 
 
 // ----- SPA screens -----
@@ -134,6 +141,21 @@ function onEvent(id, eventName, handler){
   const node = el(id);
   if (node) node.addEventListener(eventName, handler);
 }
+
+
+// Keep the add/remove items screen in sync with the selected category
+function syncItemsScreen(){
+  try{
+    const dd = document.getElementById("categories_item");
+    if (!dd) return;
+    if (typeof showSelectedCategoryItems === "function"){
+      showSelectedCategoryItems(dd, "text_area2");
+    } else if (typeof renderItemsForSelectedCategory === "function"){
+      renderItemsForSelectedCategory();
+    }
+  }catch(e){}
+}
+
 
 // ----- Data helpers -----
 function categoryNames(){
@@ -309,6 +331,7 @@ function applyItemEdit(){
   refreshEditItemChoice();
   renderCategoriesTable();
   setGlobalStatus();
+  setScreen("Categories");
 }
 
 function buildFullReport(){
@@ -318,6 +341,26 @@ function buildFullReport(){
     out += `[${row[0]}]\n`;
     out += row.slice(1).join("\n") + "\n";
     out += "=============\n";
+  }
+  setText("text_area1", out.trim());
+}
+
+
+// Report in the requested dash format:
+// [category]
+// -- item 1
+// -- item 2
+// ==========
+function buildDashReport(){
+  ensureDb();
+  let out = "";
+  for (const row of db.categories){
+    out += `[${row[0]}]\n`;
+    for (const raw of row.slice(1)){
+      const item = String(raw ?? "").trim();
+      if (item) out += `-- ${item}\n`;
+    }
+    out += "==========\n";
   }
   setText("text_area1", out.trim());
 }
@@ -335,7 +378,7 @@ function importJsonFile(file){
       if (!db.version) db.version = 1;
       if (!db.updatedAt) db.updatedAt = nowISO();
       loadedFileName = file.name;
-  saveToLocalStorage();
+      saveToLocalStorage();
       ui.AddListOutput.value = `Imported: ${file.name}`;
       refreshAllDropdowns();
       renderCategoriesTable();
@@ -363,88 +406,106 @@ function exportJson(){
   URL.revokeObjectURL(url);
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-  bindUI();
-  // ----- Wire buttons to your IDs -----
-  onEvent("btnImport","click", () => el("fileInput").click());
-  el("fileInput").addEventListener("change", () => {
-    const file = el("fileInput").files && el("fileInput").files[0];
-    el("fileInput").value = "";
-    if (file) importJsonFile(file);
-  });
+// ----- Wire buttons to your IDs -----
+onEvent("btnImport","click", () => el("fileInput").click());
+el("fileInput").addEventListener("change", () => {
+  const file = el("fileInput").files && el("fileInput").files[0];
+  el("fileInput").value = "";
+  if (file) importJsonFile(file);
+});
 
-  onEvent("btnExport","click", exportJson);
-  onEvent("btnNew","click", () => {
+onEvent("btnExport","click", exportJson);
+onEvent("btnNew","click", () => {
+  db = { schema: 1, version: 1, updatedAt: nowISO(), categories: [] };
+  loadedFileName = null;
+  saveToLocalStorage();
+  ui.AddListOutput.value = "New empty database.";
+  refreshAllDropdowns();
+  renderCategoriesTable();
+  setGlobalStatus();
+  updateNoListLabel();
+  setScreen("Categories");
+});
+
+onEvent("AddCategory_btn","click", addCategory);
+onEvent("GoList","click", () => { renderCategoriesTable(); ui.AddListOutput.value = "List refreshed."; });
+onEvent("deleteCat_btn","click", deleteSelectedCategory);
+
+onEvent("GoAddItem_btn","click", () => {
+  ensureDb();
+  refreshAllDropdowns();
+  updateNoListLabel();
+  showSelectedCategoryItems(ui.categories_item, "text_area2");
+  
+try{
+  const fromCat = document.getElementById("ListOptions");
+  const dd = document.getElementById("categories_item");
+  if (fromCat && dd && fromCat.value){
+    dd.value = fromCat.value;
+  }
+}catch(e){}
+syncItemsScreen();
+
+    setScreen("addItemstoCategories");
+});
+onEvent("ReturnAddCategories","click", () => setScreen("Categories"));
+onEvent("seeList_btn","click", () => showSelectedCategoryItems(ui.categories_item, "text_area2"));
+onEvent("addItem_btn","click", addItem);
+onEvent("removeItem_btn","click", removeItem);
+onEvent("delete_all_items","click", deleteAllItems);
+
+onEvent("report_btn","click", () => {
+  buildDashReport();
+  setScreen("Report");
+});
+onEvent("go-to-Categories","click", () => setScreen("Categories"));
+ui.CatChoice.addEventListener("change", () => showSelectedCategoryItems(ui.CatChoice, "cat_report"));
+
+onEvent("EditItem_btn","click", () => {
+  ensureDb();
+  refreshAllDropdowns();
+  refreshEditItemChoice();
+  ui.editStatus.value = "";
+  setScreen("edit_Item");
+});
+ui.editCatChoice.addEventListener("change", () => refreshEditItemChoice());
+onEvent("applyEdit_btn","click", applyItemEdit);
+
+onEvent("editBack_btn", "click", () => setScreen("Categories"));
+onEvent("returnToitem_btn","click", () => setScreen("addItemstoCategories"));
+onEvent("returnTo_Category","click", () => setScreen("Categories"));
+
+// Extra: GoList in Code.org sometimes went to a Report screen; you have a Report screen too.
+// If you want a dedicated button later, wire it to: buildFullReport(); setScreen("Report");
+
+
+// Init (restore autosaved data if present)
+(function init(){
+  const restored = loadFromLocalStorage();
+  if (restored && restored.db){
+    db = restored.db;
+    loadedFileName = (restored.meta && restored.meta.loadedFileName) ? restored.meta.loadedFileName : null;
+    ui.AddListOutput.value = "Restored autosaved data. Import JSON to replace it.";
+  } else {
     db = { schema: 1, version: 1, updatedAt: nowISO(), categories: [] };
     loadedFileName = null;
-      saveToLocalStorage();
-  ui.AddListOutput.value = "New empty database.";
-    refreshAllDropdowns();
-    renderCategoriesTable();
-    setGlobalStatus();
-    updateNoListLabel();
-    setScreen("Categories");
-  });
+    saveToLocalStorage();
+    ui.AddListOutput.value = "Ready. Import JSON to load your data. (Autosave ON)";
+  }
+  refreshAllDropdowns();
+  renderCategoriesTable();
+  setGlobalStatus();
+  updateNoListLabel();
+})();
 
-  onEvent("AddCategory_btn","click", addCategory);
-  onEvent("GoList","click", () => { renderCategoriesTable(); ui.AddListOutput.value = "List refreshed."; });
-  onEvent("deleteCat_btn","click", deleteSelectedCategory);
-
-  onEvent("GoAddItem_btn","click", () => {
-    ensureDb();
-    refreshAllDropdowns();
-    updateNoListLabel();
-    showSelectedCategoryItems(ui.categories_item, "text_area2");
-    setScreen("addItemstoCategories");
-  });
-  onEvent("ReturnAddCategories","click", () => setScreen("Categories"));
-  onEvent("seeList_btn","click", () => showSelectedCategoryItems(ui.categories_item, "text_area2"));
-  onEvent("addItem_btn","click", addItem);
-  onEvent("removeItem_btn","click", removeItem);
-  onEvent("delete_all_items","click", deleteAllItems);
-
-  onEvent("report_btn","click", () => {
-    ensureDb();
-    refreshAllDropdowns();
-    showSelectedCategoryItems(ui.CatChoice, "cat_report");
-    setScreen("Categoryreport");
-  });
-  onEvent("go-to-Categories","click", () => setScreen("Categories"));
-  ui.CatChoice.addEventListener("change", () => showSelectedCategoryItems(ui.CatChoice, "cat_report"));
-
-  onEvent("EditItem_btn","click", () => {
-    ensureDb();
-    refreshAllDropdowns();
-    refreshEditItemChoice();
-    ui.editStatus.value = "";
-    setScreen("edit_Item");
-  });
-  ui.editCatChoice.addEventListener("change", () => refreshEditItemChoice());
-  onEvent("applyEdit_btn","click", applyItemEdit);
-  onEvent("editBack_btn","click", () => setScreen("Categories"));
-
-  onEvent("returnToitem_btn","click", () => setScreen("addItemstoCategories"));
-  onEvent("returnTo_Category","click", () => setScreen("Categories"));
-
-  // Extra: GoList in Code.org sometimes went to a Report screen; you have a Report screen too.
-  // If you want a dedicated button later, wire it to: buildFullReport(); setScreen("Report");
-
-  // Init
-  (function init(){
-    const restored = loadFromLocalStorage();
-    if (restored && restored.db){
-      db = restored.db;
-      loadedFileName = (restored.meta && restored.meta.loadedFileName) ? restored.meta.loadedFileName : null;
-    } else {
-      db = { schema: 1, version: 1, updatedAt: nowISO(), categories: [] };
-      loadedFileName = null;
-      saveToLocalStorage();
-    }
-    refreshAllDropdowns();
-    renderCategoriesTable();
-    setGlobalStatus();
-    updateNoListLabel();
-    ui.AddListOutput.value = "Ready. Import JSON to load your data. Autosave is ON (this device/browser).";
-  })();
-
+// categories_item_autosync_bound
+document.addEventListener("DOMContentLoaded", function(){
+  const dd = document.getElementById("categories_item");
+  if (dd){
+    dd.addEventListener("change", function(){
+      syncItemsScreen();
+      const noList = document.getElementById("NoList");
+      if (noList) noList.textContent = "";
+    });
+  }
 });

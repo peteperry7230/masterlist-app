@@ -1,9 +1,15 @@
 "use strict";
 
 const MASTER_FILE_DEFAULT = "MasterListDB.json";
+
+// --- Auto-save (localStorage) ---
+const LOCAL_STORAGE_KEY = "MasterListSPA.db.v1";
+const LOCAL_STORAGE_META_KEY = "MasterListSPA.meta.v1";
 const el = (id) => document.getElementById(id);
 
-const ui = {
+let ui;
+function bindUI(){
+  ui = {
   globalStatus: el("globalStatus"),
   btnImport: el("btnImport"),
   btnExport: el("btnExport"),
@@ -34,7 +40,9 @@ const ui = {
 
   // Report
   text_area1: el("text_area1"),
-};
+  };
+}
+
 
 let db = null;
 let loadedFileName = null;
@@ -59,6 +67,7 @@ function bumpVersion(){
   ensureDb();
   db.version = (Number(db.version) || 0) + 1;
   db.updatedAt = nowISO();
+  saveToLocalStorage();
 }
 
 function setGlobalStatus(){
@@ -81,6 +90,36 @@ function validateDb(candidate){
   }
   return null;
 }
+
+// -------- Autosave helpers --------
+function saveToLocalStorage(){
+  try{
+    if (!db) return;
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(db));
+    localStorage.setItem(LOCAL_STORAGE_META_KEY, JSON.stringify({
+      savedAt: nowISO(),
+      loadedFileName: loadedFileName || null
+    }));
+  }catch(e){
+    // Ignore, but keep app running.
+  }
+}
+
+function loadFromLocalStorage(){
+  try{
+    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (!raw) return null;
+    const candidate = JSON.parse(raw);
+    const err = validateDb(candidate);
+    if (err) return null;
+    const metaRaw = localStorage.getItem(LOCAL_STORAGE_META_KEY);
+    const meta = metaRaw ? JSON.parse(metaRaw) : null;
+    return { db: candidate, meta };
+  }catch(e){
+    return null;
+  }
+}
+
 
 // ----- SPA screens -----
 function showScreen(screenId){
@@ -296,6 +335,7 @@ function importJsonFile(file){
       if (!db.version) db.version = 1;
       if (!db.updatedAt) db.updatedAt = nowISO();
       loadedFileName = file.name;
+  saveToLocalStorage();
       ui.AddListOutput.value = `Imported: ${file.name}`;
       refreshAllDropdowns();
       renderCategoriesTable();
@@ -323,76 +363,88 @@ function exportJson(){
   URL.revokeObjectURL(url);
 }
 
-// ----- Wire buttons to your IDs -----
-onEvent("btnImport","click", () => el("fileInput").click());
-el("fileInput").addEventListener("change", () => {
-  const file = el("fileInput").files && el("fileInput").files[0];
-  el("fileInput").value = "";
-  if (file) importJsonFile(file);
-});
+document.addEventListener("DOMContentLoaded", () => {
+  bindUI();
+  // ----- Wire buttons to your IDs -----
+  onEvent("btnImport","click", () => el("fileInput").click());
+  el("fileInput").addEventListener("change", () => {
+    const file = el("fileInput").files && el("fileInput").files[0];
+    el("fileInput").value = "";
+    if (file) importJsonFile(file);
+  });
 
-onEvent("btnExport","click", exportJson);
-onEvent("btnNew","click", () => {
-  db = { schema: 1, version: 1, updatedAt: nowISO(), categories: [] };
-  loadedFileName = null;
+  onEvent("btnExport","click", exportJson);
+  onEvent("btnNew","click", () => {
+    db = { schema: 1, version: 1, updatedAt: nowISO(), categories: [] };
+    loadedFileName = null;
+      saveToLocalStorage();
   ui.AddListOutput.value = "New empty database.";
-  refreshAllDropdowns();
-  renderCategoriesTable();
-  setGlobalStatus();
-  updateNoListLabel();
-  setScreen("Categories");
+    refreshAllDropdowns();
+    renderCategoriesTable();
+    setGlobalStatus();
+    updateNoListLabel();
+    setScreen("Categories");
+  });
+
+  onEvent("AddCategory_btn","click", addCategory);
+  onEvent("GoList","click", () => { renderCategoriesTable(); ui.AddListOutput.value = "List refreshed."; });
+  onEvent("deleteCat_btn","click", deleteSelectedCategory);
+
+  onEvent("GoAddItem_btn","click", () => {
+    ensureDb();
+    refreshAllDropdowns();
+    updateNoListLabel();
+    showSelectedCategoryItems(ui.categories_item, "text_area2");
+    setScreen("addItemstoCategories");
+  });
+  onEvent("ReturnAddCategories","click", () => setScreen("Categories"));
+  onEvent("seeList_btn","click", () => showSelectedCategoryItems(ui.categories_item, "text_area2"));
+  onEvent("addItem_btn","click", addItem);
+  onEvent("removeItem_btn","click", removeItem);
+  onEvent("delete_all_items","click", deleteAllItems);
+
+  onEvent("report_btn","click", () => {
+    ensureDb();
+    refreshAllDropdowns();
+    showSelectedCategoryItems(ui.CatChoice, "cat_report");
+    setScreen("Categoryreport");
+  });
+  onEvent("go-to-Categories","click", () => setScreen("Categories"));
+  ui.CatChoice.addEventListener("change", () => showSelectedCategoryItems(ui.CatChoice, "cat_report"));
+
+  onEvent("EditItem_btn","click", () => {
+    ensureDb();
+    refreshAllDropdowns();
+    refreshEditItemChoice();
+    ui.editStatus.value = "";
+    setScreen("edit_Item");
+  });
+  ui.editCatChoice.addEventListener("change", () => refreshEditItemChoice());
+  onEvent("applyEdit_btn","click", applyItemEdit);
+  onEvent("editBack_btn","click", () => setScreen("Categories"));
+
+  onEvent("returnToitem_btn","click", () => setScreen("addItemstoCategories"));
+  onEvent("returnTo_Category","click", () => setScreen("Categories"));
+
+  // Extra: GoList in Code.org sometimes went to a Report screen; you have a Report screen too.
+  // If you want a dedicated button later, wire it to: buildFullReport(); setScreen("Report");
+
+  // Init
+  (function init(){
+    const restored = loadFromLocalStorage();
+    if (restored && restored.db){
+      db = restored.db;
+      loadedFileName = (restored.meta && restored.meta.loadedFileName) ? restored.meta.loadedFileName : null;
+    } else {
+      db = { schema: 1, version: 1, updatedAt: nowISO(), categories: [] };
+      loadedFileName = null;
+      saveToLocalStorage();
+    }
+    refreshAllDropdowns();
+    renderCategoriesTable();
+    setGlobalStatus();
+    updateNoListLabel();
+    ui.AddListOutput.value = "Ready. Import JSON to load your data. Autosave is ON (this device/browser).";
+  })();
+
 });
-
-onEvent("AddCategory_btn","click", addCategory);
-onEvent("GoList","click", () => { renderCategoriesTable(); ui.AddListOutput.value = "List refreshed."; });
-onEvent("deleteCat_btn","click", deleteSelectedCategory);
-
-onEvent("GoAddItem_btn","click", () => {
-  ensureDb();
-  refreshAllDropdowns();
-  updateNoListLabel();
-  showSelectedCategoryItems(ui.categories_item, "text_area2");
-  setScreen("addItemstoCategories");
-});
-onEvent("ReturnAddCategories","click", () => setScreen("Categories"));
-onEvent("seeList_btn","click", () => showSelectedCategoryItems(ui.categories_item, "text_area2"));
-onEvent("addItem_btn","click", addItem);
-onEvent("removeItem_btn","click", removeItem);
-onEvent("delete_all_items","click", deleteAllItems);
-
-onEvent("report_btn","click", () => {
-  ensureDb();
-  refreshAllDropdowns();
-  showSelectedCategoryItems(ui.CatChoice, "cat_report");
-  setScreen("Categoryreport");
-});
-onEvent("go-to-Categories","click", () => setScreen("Categories"));
-ui.CatChoice.addEventListener("change", () => showSelectedCategoryItems(ui.CatChoice, "cat_report"));
-
-onEvent("EditItem_btn","click", () => {
-  ensureDb();
-  refreshAllDropdowns();
-  refreshEditItemChoice();
-  ui.editStatus.value = "";
-  setScreen("edit_Item");
-});
-ui.editCatChoice.addEventListener("change", () => refreshEditItemChoice());
-onEvent("applyEdit_btn","click", applyItemEdit);
-onEvent("editBack_btn","click", () => setScreen("Categories"));
-
-onEvent("returnToitem_btn","click", () => setScreen("addItemstoCategories"));
-onEvent("returnTo_Category","click", () => setScreen("Categories"));
-
-// Extra: GoList in Code.org sometimes went to a Report screen; you have a Report screen too.
-// If you want a dedicated button later, wire it to: buildFullReport(); setScreen("Report");
-
-// Init
-(function init(){
-  db = { schema: 1, version: 1, updatedAt: nowISO(), categories: [] };
-  loadedFileName = null;
-  refreshAllDropdowns();
-  renderCategoriesTable();
-  setGlobalStatus();
-  updateNoListLabel();
-  ui.AddListOutput.value = "Ready. Import JSON to load your data.";
-})();

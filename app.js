@@ -1,511 +1,641 @@
-"use strict";
+// =====================================================
+// MasterList (Categories + Items) - Local Storage Edition
+// Adds: Import MasterListDB.json + Export MasterListDB.json
+//
+// Data model:
+//   MasterList = [ ["Category", "Item1", "Item2"], ... ]
+//   Category name is always at index [i][0]
+// =====================================================
 
-const MASTER_FILE_DEFAULT = "MasterListDB.json";
+const STORAGE_KEY = "MasterListDB_v1";
 
-// --- Auto-save (localStorage) ---
-const LOCAL_STORAGE_KEY = "MasterListSPA.db.v1";
-const LOCAL_STORAGE_META_KEY = "MasterListSPA.meta.v1";
-const el = (id) => document.getElementById(id);
+let MasterList = [];
+let option = [];
+let CategoryIndex = {}; // category name -> MasterList index
 
-const ui = {
-  globalStatus: el("globalStatus"),
-  btnImport: el("btnImport"),
-  btnExport: el("btnExport"),
-  btnNew: el("btnNew"),
-  fileInput: el("fileInput"),
+function $(id) { return document.getElementById(id); }
 
-  // Categories
-  category: el("category"),
-  ListOptions: el("ListOptions"),
-  AddListOutput: el("AddListOutput"),
-  categoriesTableBody: el("categoriesTableBody"),
-
-  // addItemstoCategories
-  categories_item: el("categories_item"),
-  itemtoadd: el("itemtoadd"),
-  NoList: el("NoList"),
-  text_area2: el("text_area2"),
-
-  // Categoryreport
-  CatChoice: el("CatChoice"),
-  cat_report: el("cat_report"),
-
-  // edit_Item
-  editCatChoice: el("editCatChoice"),
-  editItemChoice: el("editItemChoice"),
-  editNewItemInput: el("editNewItemInput"),
-  editStatus: el("editStatus"),
-
-  // Report
-  text_area1: el("text_area1"),
-};
-
-let db = null;
-let loadedFileName = null;
-
-function normalize(s){ return String(s || "").trim(); }
-
-function nowISO() {
-  const d = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  const tzMin = d.getTimezoneOffset();
-  const sign = tzMin <= 0 ? "+" : "-";
-  const abs = Math.abs(tzMin);
-  const tzh = pad(Math.floor(abs / 60));
-  const tzm = pad(abs % 60);
-  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}${sign}${tzh}:${tzm}`;
-}
-
-function ensureDb(){
-  if (!db) db = { schema: 1, version: 1, updatedAt: nowISO(), categories: [] };
-}
-function bumpVersion(){
-  ensureDb();
-  db.version = (Number(db.version) || 0) + 1;
-  db.updatedAt = nowISO();
-  saveToLocalStorage();
-}
-
-function setGlobalStatus(){
-  if (!db) { ui.globalStatus.textContent = "No file loaded."; ui.btnExport.disabled = true; return; }
-  ui.btnExport.disabled = false;
-  const filePart = loadedFileName ? `Loaded: ${loadedFileName}` : "Working set (not imported)";
-  ui.globalStatus.textContent = `${filePart} | v${db.version} | updated ${db.updatedAt} | categories ${db.categories.length} | autosave on`;
-}
-
-function setText(id, value){ el(id).value = value; }
-function getText(id){ return (el(id).value ?? ""); }
-function setLabel(id, value){ el(id).textContent = value; }
-
-function validateDb(candidate){
-  if (!candidate || typeof candidate !== "object") return "File is not a JSON object.";
-  if (!Array.isArray(candidate.categories)) return "Missing or invalid 'categories' array.";
-  for (const row of candidate.categories) {
-    if (!Array.isArray(row) || row.length < 1) return "Each category row must be an array with at least a category name.";
-    if (typeof row[0] !== "string") return "Category name (index 0) must be a string.";
-  }
-  return null;
-}
-
-// -------- Autosave helpers --------
-function saveToLocalStorage(){
-  try{
-    if (!db) return;
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(db));
-    localStorage.setItem(LOCAL_STORAGE_META_KEY, JSON.stringify({
-      savedAt: nowISO(),
-      loadedFileName: loadedFileName || null
-    }));
-  }catch(e){
-    // Storage can fail (private mode, quota). We do not hard-fail the app.
-    try{
-      ui.AddListOutput.value = (ui.AddListOutput.value || "") + " (autosave failed)";
-    }catch(_e){}
-  }
-}
-
-function loadFromLocalStorage(){
-  try{
-    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (!raw) return null;
-    const candidate = JSON.parse(raw);
-    const err = validateDb(candidate);
-    if (err) return null;
-    const metaRaw = localStorage.getItem(LOCAL_STORAGE_META_KEY);
-    const meta = metaRaw ? JSON.parse(metaRaw) : null;
-    return { db: candidate, meta: meta };
-  }catch(e){
-    return null;
-  }
-}
-
-function clearLocalStorage(){
-  try{
-    localStorage.removeItem(LOCAL_STORAGE_KEY);
-    localStorage.removeItem(LOCAL_STORAGE_META_KEY);
-  }catch(e){}
-}
-
-
-
-// ----- SPA screens -----
-function showScreen(screenId){
-  document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
-  const target = document.getElementById(screenId);
-  if (target) target.classList.add("active");
-}
-function setScreen(screenId){ showScreen(screenId); }
-
-// ----- onEvent port -----
-function onEvent(id, eventName, handler){
-  const node = el(id);
-  if (node) node.addEventListener(eventName, handler);
-}
-
-
-// Keep the add/remove items screen in sync with the selected category
-function syncItemsScreen(){
-  try{
-    const dd = document.getElementById("categories_item");
-    if (!dd) return;
-    if (typeof showSelectedCategoryItems === "function"){
-      showSelectedCategoryItems(dd, "text_area2");
-    } else if (typeof renderItemsForSelectedCategory === "function"){
-      renderItemsForSelectedCategory();
-    }
-  }catch(e){}
-}
-
-
-// ----- Data helpers -----
-function categoryNames(){
-  ensureDb();
-  return db.categories.map(r => r[0]);
-}
-function getCategoryIndexByName(name){
-  ensureDb();
-  const n = normalize(name).toLowerCase();
-  for (let i=0;i<db.categories.length;i++){
-    if (normalize(db.categories[i][0]).toLowerCase() === n) return i;
-  }
-  return -1;
-}
-function refreshDropdown(selectEl){
-  const names = categoryNames();
-  selectEl.innerHTML = "";
-  names.forEach(n => {
-    const opt = document.createElement("option");
-    opt.value = n;
-    opt.textContent = n;
-    selectEl.appendChild(opt);
+function setScreen(screenId) {
+  const screens = ["Categories", "addItemstoCategories", "Categoryreport", "Report", "edit_Item"];
+  screens.forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    el.classList.toggle("hidden", id !== screenId);
   });
 }
-function refreshEditItemChoice(){
-  ensureDb();
-  const catName = normalize(ui.editCatChoice.value);
-  const idx = getCategoryIndexByName(catName);
-  ui.editItemChoice.innerHTML = "";
-  if (idx < 0) return;
-  db.categories[idx].slice(1).forEach(it => {
-    const opt = document.createElement("option");
-    opt.value = it; opt.textContent = it;
-    ui.editItemChoice.appendChild(opt);
-  });
-}
-function refreshAllDropdowns(){
-  refreshDropdown(ui.ListOptions);
-  refreshDropdown(ui.categories_item);
-  refreshDropdown(ui.CatChoice);
-  refreshDropdown(ui.editCatChoice);
-  refreshEditItemChoice();
-}
-function renderCategoriesTable(){
-  ensureDb();
-  ui.categoriesTableBody.innerHTML = "";
-  for (const row of db.categories){
-    const tr = document.createElement("tr");
-    const tdCat = document.createElement("td");
-    tdCat.textContent = row[0];
-    const tdItems = document.createElement("td");
-    tdItems.textContent = row.slice(1).join("\n");
-    tr.appendChild(tdCat);
-    tr.appendChild(tdItems);
-    ui.categoriesTableBody.appendChild(tr);
-  }
-}
-function updateNoListLabel(){
-  ensureDb();
-  setLabel("NoList", db.categories.length ? "" : "No categories yet.");
-}
-function showSelectedCategoryItems(selectEl, outputId){
-  ensureDb();
-  const name = normalize(selectEl.value);
-  const idx = getCategoryIndexByName(name);
-  if (idx < 0) { setText(outputId, ""); return; }
-  setText(outputId, db.categories[idx].slice(1).join("\n"));
+
+function setText(id, value) {
+  const el = $(id);
+  if (!el) return;
+  if ("value" in el) el.value = value;
+  else el.textContent = value;
 }
 
-// ----- Actions -----
-function addCategory(){
-  ensureDb();
-  const name = normalize(getText("category"));
-  setText("category", "");
-  if (!name){ ui.AddListOutput.value = "Type a category name."; return; }
-  if (getCategoryIndexByName(name) !== -1){ ui.AddListOutput.value = "Category already exists."; return; }
-  db.categories.push([name]);
-  bumpVersion();
-  ui.AddListOutput.value = `Added category: ${name}`;
-  refreshAllDropdowns();
-  renderCategoriesTable();
-  setGlobalStatus();
-  updateNoListLabel();
+function getText(id) {
+  const el = $(id);
+  if (!el) return "";
+  if ("value" in el) return el.value;
+  return el.textContent || "";
 }
 
-function deleteSelectedCategory(){
-  ensureDb();
-  const name = normalize(ui.ListOptions.value);
-  if (!name){ ui.AddListOutput.value = "No category selected."; return; }
-  const idx = getCategoryIndexByName(name);
-  if (idx < 0){ ui.AddListOutput.value = "Category not found."; return; }
-  if (!confirm(`Delete category "${name}" and all its items?`)) return;
-  db.categories.splice(idx,1);
-  bumpVersion();
-  ui.AddListOutput.value = `Deleted category: ${name}`;
-  refreshAllDropdowns();
-  renderCategoriesTable();
-  setGlobalStatus();
-  updateNoListLabel();
-}
+function setProperty(id, prop, value) {
+  const el = $(id);
+  if (!el) return;
 
-function addItem(){
-  ensureDb();
-  const cat = normalize(ui.categories_item.value);
-  const idx = getCategoryIndexByName(cat);
-  const item = normalize(getText("itemtoadd"));
-  setText("itemtoadd", "");
-  if (idx < 0){ setLabel("NoList", "Select a category first."); return; }
-  if (!item){ setLabel("NoList", "Type an item."); return; }
-  db.categories[idx].push(item);
-  bumpVersion();
-  setLabel("NoList", `Added "${item}" to ${cat}.`);
-  showSelectedCategoryItems(ui.categories_item, "text_area2");
-  renderCategoriesTable();
-  setGlobalStatus();
-}
-
-function removeItem(){
-  ensureDb();
-  const cat = normalize(ui.categories_item.value);
-  const idx = getCategoryIndexByName(cat);
-  const item = normalize(getText("itemtoadd"));
-  setText("itemtoadd", "");
-  if (idx < 0){ setLabel("NoList", "Select a category first."); return; }
-  if (!item){ setLabel("NoList", "Type an item to remove."); return; }
-  const row = db.categories[idx];
-  let removed = false;
-  for (let i=1;i<row.length;i++){
-    if (normalize(row[i]).toLowerCase() === item.toLowerCase()){
-      row.splice(i,1); removed = true; break;
-    }
-  }
-  if (!removed){ setLabel("NoList", `Item not found: "${item}"`); return; }
-  bumpVersion();
-  setLabel("NoList", `Removed "${item}" from ${cat}.`);
-  showSelectedCategoryItems(ui.categories_item, "text_area2");
-  renderCategoriesTable();
-  setGlobalStatus();
-}
-
-function deleteAllItems(){
-  ensureDb();
-  const cat = normalize(ui.categories_item.value);
-  const idx = getCategoryIndexByName(cat);
-  if (idx < 0){ setLabel("NoList", "Select a category first."); return; }
-  if (!confirm(`Delete ALL items in "${cat}" (keep category)?`)) return;
-  db.categories[idx] = [db.categories[idx][0]];
-  bumpVersion();
-  setLabel("NoList", `Cleared items in ${cat}.`);
-  showSelectedCategoryItems(ui.categories_item, "text_area2");
-  renderCategoriesTable();
-  setGlobalStatus();
-}
-
-function applyItemEdit(){
-  ensureDb();
-  const cat = normalize(ui.editCatChoice.value);
-  const idx = getCategoryIndexByName(cat);
-  const oldItem = normalize(ui.editItemChoice.value);
-  const newItem = normalize(getText("editNewItemInput"));
-  setText("editNewItemInput", "");
-  if (idx < 0){ ui.editStatus.value = "Select a category."; return; }
-  if (!oldItem){ ui.editStatus.value = "Select an item."; return; }
-  if (!newItem){ ui.editStatus.value = "Type a new item value."; return; }
-  const row = db.categories[idx];
-  let changed = false;
-  for (let i=1;i<row.length;i++){
-    if (row[i] === oldItem){ row[i] = newItem; changed = true; break; }
-  }
-  if (!changed){ ui.editStatus.value = "Item not found."; return; }
-  bumpVersion();
-  ui.editStatus.value = `Replaced "${oldItem}" with "${newItem}" in ${cat}.`;
-  refreshEditItemChoice();
-  renderCategoriesTable();
-  setGlobalStatus();
-  setScreen("Categories");
-}
-
-function buildFullReport(){
-  ensureDb();
-  let out = "";
-  for (const row of db.categories){
-    out += `[${row[0]}]\n`;
-    out += row.slice(1).join("\n") + "\n";
-    out += "=============\n";
-  }
-  setText("text_area1", out.trim());
-}
-
-
-// Report in the requested dash format:
-// [category]
-// -- item 1
-// -- item 2
-// ==========
-function buildDashReport(){
-  ensureDb();
-  let out = "";
-  for (const row of db.categories){
-    out += `[${row[0]}]\n`;
-    for (const raw of row.slice(1)){
-      const item = String(raw ?? "").trim();
-      if (item) out += `-- ${item}\n`;
-    }
-    out += "==========\n";
-  }
-  setText("text_area1", out.trim());
-}
-
-// ----- File I/O -----
-function importJsonFile(file){
-  const reader = new FileReader();
-  reader.onload = () => {
-    try{
-      const candidate = JSON.parse(String(reader.result || ""));
-      const err = validateDb(candidate);
-      if (err){ alert(err); return; }
-      db = candidate;
-      if (!db.schema) db.schema = 1;
-      if (!db.version) db.version = 1;
-      if (!db.updatedAt) db.updatedAt = nowISO();
-      loadedFileName = file.name;
-      saveToLocalStorage();
-      ui.AddListOutput.value = `Imported: ${file.name}`;
-      refreshAllDropdowns();
-      renderCategoriesTable();
-      setGlobalStatus();
-      updateNoListLabel();
-      setScreen("Categories");
-    }catch(e){
-      alert("Could not parse JSON: " + e.message);
-    }
-  };
-  reader.readAsText(file);
-}
-
-function exportJson(){
-  ensureDb();
-  const base = (loadedFileName || MASTER_FILE_DEFAULT).replace(/[^a-zA-Z0-9._-]/g, "_");
-  const stem = base.replace(/\.json$/i, "");
-  const fileName = `${stem}_v${String(db.version).padStart(4,"0")}.json`;
-  const blob = new Blob([JSON.stringify(db, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url; a.download = fileName;
-  document.body.appendChild(a);
-  a.click(); a.remove();
-  URL.revokeObjectURL(url);
-}
-
-// ----- Wire buttons to your IDs -----
-onEvent("btnImport","click", () => el("fileInput").click());
-el("fileInput").addEventListener("change", () => {
-  const file = el("fileInput").files && el("fileInput").files[0];
-  el("fileInput").value = "";
-  if (file) importJsonFile(file);
-});
-
-onEvent("btnExport","click", exportJson);
-onEvent("btnNew","click", () => {
-  db = { schema: 1, version: 1, updatedAt: nowISO(), categories: [] };
-  loadedFileName = null;
-  saveToLocalStorage();
-  ui.AddListOutput.value = "New empty database.";
-  refreshAllDropdowns();
-  renderCategoriesTable();
-  setGlobalStatus();
-  updateNoListLabel();
-  setScreen("Categories");
-});
-
-onEvent("AddCategory_btn","click", addCategory);
-onEvent("GoList","click", () => { renderCategoriesTable(); ui.AddListOutput.value = "List refreshed."; });
-onEvent("deleteCat_btn","click", deleteSelectedCategory);
-
-onEvent("GoAddItem_btn","click", () => {
-  ensureDb();
-  refreshAllDropdowns();
-  updateNoListLabel();
-  showSelectedCategoryItems(ui.categories_item, "text_area2");
-  
-try{
-  const fromCat = document.getElementById("ListOptions");
-  const dd = document.getElementById("categories_item");
-  if (fromCat && dd && fromCat.value){
-    dd.value = fromCat.value;
-  }
-}catch(e){}
-syncItemsScreen();
-
-    setScreen("addItemstoCategories");
-});
-onEvent("ReturnAddCategories","click", () => setScreen("Categories"));
-onEvent("seeList_btn","click", () => showSelectedCategoryItems(ui.categories_item, "text_area2"));
-onEvent("addItem_btn","click", addItem);
-onEvent("removeItem_btn","click", removeItem);
-onEvent("delete_all_items","click", deleteAllItems);
-
-onEvent("report_btn","click", () => {
-  buildDashReport();
-  setScreen("Report");
-});
-onEvent("go-to-Categories","click", () => setScreen("Categories"));
-ui.CatChoice.addEventListener("change", () => showSelectedCategoryItems(ui.CatChoice, "cat_report"));
-
-onEvent("EditItem_btn","click", () => {
-  ensureDb();
-  refreshAllDropdowns();
-  refreshEditItemChoice();
-  ui.editStatus.value = "";
-  setScreen("edit_Item");
-});
-ui.editCatChoice.addEventListener("change", () => refreshEditItemChoice());
-onEvent("applyEdit_btn","click", applyItemEdit);
-
-onEvent("editBack_btn", "click", () => setScreen("Categories"));
-onEvent("returnToitem_btn","click", () => setScreen("addItemstoCategories"));
-onEvent("returnTo_Category","click", () => setScreen("Categories"));
-
-// Extra: GoList in Code.org sometimes went to a Report screen; you have a Report screen too.
-// If you want a dedicated button later, wire it to: buildFullReport(); setScreen("Report");
-
-
-// Init (restore autosaved data if present)
-(function init(){
-  const restored = loadFromLocalStorage();
-  if (restored && restored.db){
-    db = restored.db;
-    loadedFileName = (restored.meta && restored.meta.loadedFileName) ? restored.meta.loadedFileName : null;
-    ui.AddListOutput.value = "Restored autosaved data. Import JSON to replace it.";
-  } else {
-    db = { schema: 1, version: 1, updatedAt: nowISO(), categories: [] };
-    loadedFileName = null;
-    saveToLocalStorage();
-    ui.AddListOutput.value = "Ready. Import JSON to load your data. (Autosave ON)";
-  }
-  refreshAllDropdowns();
-  renderCategoriesTable();
-  setGlobalStatus();
-  updateNoListLabel();
-})();
-
-// categories_item_autosync_bound
-document.addEventListener("DOMContentLoaded", function(){
-  const dd = document.getElementById("categories_item");
-  if (dd){
-    dd.addEventListener("change", function(){
-      syncItemsScreen();
-      const noList = document.getElementById("NoList");
-      if (noList) noList.textContent = "";
+  if (prop === "options" && el.tagName === "SELECT") {
+    el.innerHTML = "";
+    (value || []).forEach(v => {
+      const opt = document.createElement("option");
+      opt.value = v;
+      opt.textContent = v;
+      el.appendChild(opt);
     });
+    return;
   }
-});
+
+  if (prop === "index" && el.tagName === "SELECT") {
+    el.selectedIndex = Math.max(0, value ?? 0);
+    return;
+  }
+
+  el[prop] = value;
+}
+
+function getProperty(id, prop) {
+  const el = $(id);
+  if (!el) return null;
+
+  if (prop === "options" && el.tagName === "SELECT") {
+    return Array.from(el.options).map(o => o.value);
+  }
+
+  if (prop === "index" && el.tagName === "SELECT") {
+    return el.selectedIndex;
+  }
+
+  return el[prop];
+}
+
+function showElement(id) { const el = $(id); if (el) el.style.display = ""; }
+function hideElement(id) { const el = $(id); if (el) el.style.display = "none"; }
+
+function normalize(s) {
+  if (s === undefined || s === null) return "";
+  return ("" + s).trim();
+}
+
+function showNoList(msg) { setText("NoList", msg); showElement("NoList"); }
+function hideNoList() { setText("NoList", ""); hideElement("NoList"); }
+
+// ----------------------------
+// INDEXING
+// ----------------------------
+function rebuildCategoryIndex() {
+  CategoryIndex = {};
+  for (let i = 0; i < MasterList.length; i++) {
+    CategoryIndex[MasterList[i][0]] = i;
+  }
+}
+
+function findCategoryIndex(name) {
+  name = normalize(name);
+  if (name === "") return -1;
+  const idx = CategoryIndex[name];
+  return (idx === undefined) ? -1 : idx;
+}
+
+// ----------------------------
+// OPTIONS / DROPDOWNS
+// ----------------------------
+function rebuildOptionsFromMasterList() {
+  option = [];
+  for (let i = 0; i < MasterList.length; i++) option.push(MasterList[i][0]);
+}
+
+function syncCategoryOptions() {
+  rebuildOptionsFromMasterList();
+  setProperty("ListOptions", "options", option);
+  setProperty("categories_item", "options", option);
+  setProperty("editCatChoice", "options", option);
+  setProperty("CatChoice", "options", option);
+}
+
+function ensureValidCategorySelection(dropdownId) {
+  if (option.length === 0) return false;
+  const idx = getProperty(dropdownId, "index");
+  if (idx === undefined || idx === null || idx < 0) setProperty(dropdownId, "index", 0);
+  return true;
+}
+
+// ----------------------------
+// RENDERING
+// ----------------------------
+function itemsToBulletText(arr) {
+  if (!arr || arr.length <= 1) return "No items yet.";
+  let out = "";
+  for (let i = 1; i < arr.length; i++) out += "- " + arr[i] + "\n";
+  return out;
+}
+
+function display() {
+  let text = "";
+  for (let i = 0; i < MasterList.length; i++) {
+    text += "[" + MasterList[i][0] + "]\n";
+    text += itemsToBulletText(MasterList[i]) + "\n";
+    text += "=============\n";
+  }
+  setText("text_area1", text);
+}
+
+function showItemsForSelectedCategory() {
+  const selectedCategory = getText("categories_item");
+
+  if (option.length === 0) {
+    setText("text_area2", "");
+    showNoList("No categories yet. Add a category first.");
+    return;
+  }
+
+  if (!selectedCategory) {
+    setText("text_area2", "");
+    showNoList("Choose a category.");
+    return;
+  }
+
+  const idx = findCategoryIndex(selectedCategory);
+  if (idx === -1) {
+    setText("text_area2", "");
+    showNoList("Category not found.");
+    return;
+  }
+
+  setText("text_area2", itemsToBulletText(MasterList[idx]));
+}
+
+function showCatReport() {
+  const selectedCategory = getText("CatChoice");
+  if (!selectedCategory) { setText("cat_report", ""); return; }
+
+  const idx = findCategoryIndex(selectedCategory);
+  if (idx === -1) { setText("cat_report", "Not found."); return; }
+
+  setText("cat_report", itemsToBulletText(MasterList[idx]));
+}
+
+// ----------------------------
+// SCREEN REFRESHERS
+// ----------------------------
+function refreshCategoriesUI() {
+  if (option.length > 0) {
+    setProperty("ListOptions", "index", 0);
+    // do not overwrite status if it has an import/export message
+  } else {
+    setText("AddListOutput", "No categories yet.");
+  }
+}
+
+function refreshAddItemsUI() {
+  if (!ensureValidCategorySelection("categories_item")) {
+    showNoList("No categories yet. Add a category first.");
+    setText("text_area2", "");
+    return;
+  }
+  hideNoList();
+  showItemsForSelectedCategory();
+}
+
+function fillEditItemsDropdown() {
+  const categoryName = getText("editCatChoice");
+
+  if (!categoryName) {
+    setProperty("editItemChoice", "options", []);
+    setText("editStatus", "Choose a category.");
+    return;
+  }
+
+  const idx = findCategoryIndex(categoryName);
+  if (idx === -1) {
+    setProperty("editItemChoice", "options", []);
+    setText("editStatus", "Category not found.");
+    return;
+  }
+
+  let items = [];
+  for (let i = 1; i < MasterList[idx].length; i++) items.push(MasterList[idx][i]);
+  if (items.length === 0) items = ["No items"];
+
+  setProperty("editItemChoice", "options", items);
+  setProperty("editItemChoice", "index", 0);
+
+  const first = getText("editItemChoice");
+  setText("editNewItemInput", (first !== "No items") ? first : "");
+}
+
+function selectDropdownValueIfPresent(dropdownId, value) {
+  const el = $(dropdownId);
+  if (!el || el.tagName !== "SELECT") return;
+  const idx = Array.from(el.options).findIndex(o => o.value === value);
+  if (idx >= 0) el.selectedIndex = idx;
+}
+
+function refreshEditScreenUI() {
+  if (!ensureValidCategorySelection("editCatChoice")) {
+    setProperty("editItemChoice", "options", []);
+  } else {
+    fillEditItemsDropdown();
+  }
+  setText("editNewItemInput", "");
+  setText("editStatus", "");
+}
+
+function refreshCategoryReportUI() {
+  if (!ensureValidCategorySelection("CatChoice")) {
+    setText("cat_report", "");
+    return;
+  }
+  showCatReport();
+}
+
+// ----------------------------
+// LOCAL STORAGE PERSISTENCE
+// ----------------------------
+function makePayload() {
+  return {
+    schema: 1,
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    categories: MasterList
+  };
+}
+
+function saveToStorage() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(makePayload()));
+}
+
+function loadFromStorage() {
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if (!raw) {
+    MasterList = [];
+    rebuildCategoryIndex();
+    syncCategoryOptions();
+    return;
+  }
+
+  try {
+    const obj = JSON.parse(raw);
+    const cats = Array.isArray(obj) ? obj : (obj.categories || []);
+    MasterList = Array.isArray(cats) ? cats : [];
+  } catch (e) {
+    MasterList = [];
+  }
+
+  rebuildCategoryIndex();
+  syncCategoryOptions();
+}
+
+// ----------------------------
+// IMPORT / EXPORT
+// ----------------------------
+function validateCategoriesShape(cats) {
+  if (!Array.isArray(cats)) return { ok: false, message: "JSON is missing a categories array." };
+
+  for (let i = 0; i < cats.length; i++) {
+    const row = cats[i];
+    if (!Array.isArray(row) || row.length < 1) {
+      return { ok: false, message: "Category entry #" + (i + 1) + " is not a valid array." };
+    }
+    const name = normalize(row[0]);
+    if (name === "") {
+      return { ok: false, message: "Category entry #" + (i + 1) + " has an empty name at [0]." };
+    }
+  }
+  return { ok: true, message: "OK" };
+}
+
+function setAllFromImported(categories) {
+  // Normalize category names and items; preserve ordering
+  MasterList = categories.map(arr => arr.map(v => normalize(v)));
+  rebuildCategoryIndex();
+  syncCategoryOptions();
+  saveToStorage();
+
+  // Refresh screens in case user is not on Categories
+  refreshCategoriesUI();
+  refreshAddItemsUI();
+  refreshEditScreenUI();
+  refreshCategoryReportUI();
+  display();
+}
+
+async function importFromSelectedFile() {
+  const input = $("importFile");
+  const file = input?.files?.[0];
+  if (!file) {
+    setText("AddListOutput", "Select MasterListDB.json first.");
+    return;
+  }
+
+  try {
+    const text = await file.text();
+    const obj = JSON.parse(text);
+    const cats = Array.isArray(obj) ? obj : (obj.categories || []);
+    const v = validateCategoriesShape(cats);
+    if (!v.ok) {
+      setText("AddListOutput", "Import failed: " + v.message);
+      return;
+    }
+
+    setAllFromImported(cats);
+    setText("AddListOutput", "Imported " + cats.length + " categories from " + file.name + ".");
+  } catch (e) {
+    setText("AddListOutput", "Import failed: invalid JSON file.");
+  } finally {
+    // allow re-importing same file without reselecting in some browsers
+    if (input) input.value = "";
+  }
+}
+
+function exportToJsonFile() {
+  // Browser-safe export: triggers a normal download so the browser can present a Save dialog.
+  // Note: Whether you see a “Save As…” prompt depends on your browser settings.
+  const payload = makePayload();
+  const jsonText = JSON.stringify(payload, null, 2);
+
+  const blob = new Blob([jsonText], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "MasterListDB.json";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+
+  // Give the browser a moment to start the download before revoking (Safari is happier with this).
+  setTimeout(function () {
+    URL.revokeObjectURL(url);
+  }, 1000);
+
+  setText("AddListOutput", "Export started: MasterListDB.json (" + MasterList.length + " categories).");
+}
+
+
+// ----------------------------
+// OPERATIONS
+// ----------------------------
+function addCategory(categoryName) {
+  categoryName = normalize(categoryName);
+  if (categoryName === "") {
+    setText("AddListOutput", "Type a category name.");
+    return;
+  }
+  if (findCategoryIndex(categoryName) !== -1) {
+    setText("AddListOutput", "Category already exists: " + categoryName);
+    return;
+  }
+
+  MasterList.push([categoryName]);
+  CategoryIndex[categoryName] = MasterList.length - 1;
+
+  syncCategoryOptions();
+  saveToStorage();
+
+  setText("category", "");
+  refreshCategoriesUI();
+  setText("AddListOutput", "Added: " + categoryName);
+}
+
+function deleteSelectedCategory() {
+  const catIndex = getProperty("ListOptions", "index");
+  if (catIndex === undefined || catIndex === null || catIndex < 0) {
+    setText("AddListOutput", "Choose a category to delete.");
+    return;
+  }
+  if (catIndex >= MasterList.length) return;
+
+  const name = MasterList[catIndex][0];
+
+  // Delete all entries matching the name (keeps compatibility with old duplicates)
+  MasterList = MasterList.filter(arr => arr[0] !== name);
+
+  rebuildCategoryIndex();
+  syncCategoryOptions();
+  saveToStorage();
+
+  refreshCategoriesUI();
+  setText("AddListOutput", "Deleted: " + name);
+}
+
+function addItemToSelectedCategory() {
+  const categoryName = normalize(getText("categories_item"));
+  const newItem = normalize(getText("itemtoadd"));
+
+  if (newItem === "") {
+    showNoList("Type an item to add.");
+    return;
+  }
+
+  setText("itemtoadd", "");
+  hideNoList();
+
+  const idx = findCategoryIndex(categoryName);
+  if (idx === -1) { showNoList("Category not found."); return; }
+
+  MasterList[idx].push(newItem);
+  saveToStorage();
+
+  showItemsForSelectedCategory();
+  showNoList("Added: " + newItem);
+}
+
+function removeItemFromSelectedCategory() {
+  const categoryName = normalize(getText("categories_item"));
+  const itemName = normalize(getText("itemtoadd"));
+
+  if (itemName === "") { showNoList("Type an item to remove."); return; }
+
+  const idx = findCategoryIndex(categoryName);
+  if (idx === -1) { showNoList("Category not found."); return; }
+
+  const target = normalize(itemName);
+  const oldArray = MasterList[idx];
+
+  const newArray = [oldArray[0]];
+  let removedCount = 0;
+
+  for (let i = 1; i < oldArray.length; i++) {
+    if (normalize(oldArray[i]) === target) removedCount++;
+    else newArray.push(oldArray[i]);
+  }
+
+  setText("itemtoadd", "");
+
+  if (removedCount === 0) { showNoList("Item not found: " + itemName); return; }
+
+  MasterList[idx] = newArray;
+  saveToStorage();
+
+  showItemsForSelectedCategory();
+  showNoList("Removed " + removedCount + " time(s): " + itemName);
+}
+
+function deleteAllItemsKeepCategories() {
+  for (let i = 0; i < MasterList.length; i++) {
+    MasterList[i] = [MasterList[i][0]];
+  }
+  rebuildCategoryIndex();
+  saveToStorage();
+
+  syncCategoryOptions();
+  showItemsForSelectedCategory();
+  refreshEditScreenUI();
+  refreshCategoryReportUI();
+  showNoList("All items deleted (categories kept).");
+}
+
+function applyEdit() {
+  const categoryName = normalize(getText("editCatChoice"));
+  const oldItem = getText("editItemChoice");
+  const newItem = normalize(getText("editNewItemInput"));
+
+  if (categoryName === "") { setText("editStatus", "Choose a category."); return; }
+  if (oldItem === "" || oldItem === "No items") { setText("editStatus", "Choose an item to edit."); return; }
+  if (newItem === "") { setText("editStatus", "Type the new item text."); return; }
+
+  const idx = findCategoryIndex(categoryName);
+  if (idx === -1) { setText("editStatus", "Category not found."); return; }
+
+  let pos = -1;
+  for (let i = 1; i < MasterList[idx].length; i++) {
+    if (MasterList[idx][i] === oldItem) { pos = i; break; }
+  }
+  if (pos === -1) { setText("editStatus", "Item not found in that category."); return; }
+
+  MasterList[idx][pos] = newItem;
+  saveToStorage();
+
+  fillEditItemsDropdown();
+  selectDropdownValueIfPresent("editItemChoice", newItem);
+  setText("editStatus", "Updated '" + oldItem + "' to '" + newItem + "'.");
+}
+
+// ----------------------------
+// NAVIGATION
+// ----------------------------
+function goAddItems() { setScreen("addItemstoCategories"); refreshAddItemsUI(); }
+function goCategories() { setScreen("Categories"); refreshCategoriesUI(); }
+
+// ----------------------------
+// EVENT WIRING
+// ----------------------------
+function wireEvents() {
+  // Categories screen
+  $("AddCategory_btn").addEventListener("click", () => addCategory(getText("category")));
+  $("deleteCat_btn").addEventListener("click", deleteSelectedCategory);
+
+  $("GoAddItem_btn").addEventListener("click", goAddItems);
+
+  $("GoList").addEventListener("click", () => { setScreen("Report"); display(); });
+  $("EditItem_btn").addEventListener("click", () => { setScreen("edit_Item"); refreshEditScreenUI(); });
+  $("report_btn").addEventListener("click", () => { setScreen("Categoryreport"); refreshCategoryReportUI(); });
+
+  // Import / Export
+  $("import_btn").addEventListener("click", importFromSelectedFile);
+  $("export_btn").addEventListener("click", exportToJsonFile);
+
+  // Add items screen
+  $("categories_item").addEventListener("change", () => { hideNoList(); showItemsForSelectedCategory(); });
+  $("additem_btn").addEventListener("click", addItemToSelectedCategory);
+  $("removeItem_btn").addEventListener("click", removeItemFromSelectedCategory);
+  $("seeList_btn").addEventListener("click", () => { setScreen("Report"); display(); });
+  $("delete_all_items").addEventListener("click", deleteAllItemsKeepCategories);
+  $("ReturnAddCategories").addEventListener("click", goCategories);
+
+  // Category report screen
+  $("CatChoice").addEventListener("change", showCatReport);
+  $("go-to-Categories").addEventListener("click", goCategories);
+  $("returnToitem_btn").addEventListener("click", goAddItems);
+
+  // Report screen
+  $("returnTo_Category").addEventListener("click", goCategories);
+  $("returnToitem_btn_report").addEventListener("click", goAddItems);
+
+  // Edit screen
+  $("editCatChoice").addEventListener("change", () => {
+    fillEditItemsDropdown();
+    setText("editNewItemInput", "");
+    setText("editStatus", "");
+  });
+  $("editItemChoice").addEventListener("change", () => {
+    const oldItem = getText("editItemChoice");
+    setText("editNewItemInput", oldItem);
+    setText("editStatus", "");
+  });
+  $("applyEdit_btn").addEventListener("click", applyEdit);
+  $("editBack_btn").addEventListener("click", goCategories);
+}
+
+// ----------------------------
+// AUTO-IMPORT (optional)
+// ----------------------------
+// Attempts to fetch ./MasterListDB.json from the same directory as index.html.
+//
+// Safety rules:
+//  - If localStorage already has data, it will NOT overwrite unless you launch with ?overwrite=1
+//  - If localStorage is empty, it will auto-load if the JSON file is reachable
+//
+// Notes:
+//  - Many browsers block fetch() from file:// URLs. For auto-import to work reliably,
+//    run a local web server (examples):
+//      - Python:  python3 -m http.server 8000
+//      - Node:    npx serve .
+//    Then open: http://localhost:8000
+async function tryAutoImportFromJsonFile() {
+  const hasExisting = !!localStorage.getItem(STORAGE_KEY);
+  const params = new URLSearchParams(window.location.search);
+  const allowOverwrite = params.get("overwrite") === "1";
+
+  if (hasExisting && !allowOverwrite) return;
+
+  try {
+    const res = await fetch("./MasterListDB.json", { cache: "no-store" });
+    if (!res.ok) return;
+
+    const obj = await res.json();
+    const cats = Array.isArray(obj) ? obj : (obj.categories || []);
+    const v = validateCategoriesShape(cats);
+    if (!v.ok) return;
+
+    MasterList = cats.map(arr => arr.map(v => normalize(v)));
+    rebuildCategoryIndex();
+    syncCategoryOptions();
+    saveToStorage();
+
+    setText("AddListOutput", "Auto-imported MasterListDB.json (" + cats.length + " categories).");
+  } catch (e) {
+    // Fail silently; manual import remains available.
+    return;
+  }
+}
+
+// ----------------------------
+// STARTUP
+// ----------------------------
+async function init() {
+  hideElement("NoList");
+  setProperty("ListOptions", "options", []);
+
+  // Attempt auto-import first (may populate localStorage)
+  await tryAutoImportFromJsonFile();
+
+  // Then load whatever is in localStorage
+
+  loadFromStorage();
+  wireEvents();
+
+  setScreen("Categories");
+  refreshCategoriesUI();
+}
+
+document.addEventListener("DOMContentLoaded", init);

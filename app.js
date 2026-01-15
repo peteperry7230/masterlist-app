@@ -481,18 +481,45 @@ function removeItemFromSelectedCategory() {
 }
 
 function deleteAllItemsKeepCategories() {
-  for (let i = 0; i < MasterList.length; i++) {
-    MasterList[i] = [MasterList[i][0]];
+  // Deletes ONLY the items in the currently selected category on the Add Items screen.
+  // Keeps the category itself (index 0) intact.
+  const categoryName = normalize(getText("categories_item"));
+
+  if (option.length === 0) {
+    showNoList("No categories yet. Add a category first.");
+    setText("text_area2", "");
+    return;
   }
-  rebuildCategoryIndex();
+
+  if (!categoryName) {
+    showNoList("Choose a category first.");
+    return;
+  }
+
+  const idx = findCategoryIndex(categoryName);
+  if (idx == -1) {
+    showNoList("Category not found.");
+    return;
+  }
+
+  // If there are no items, do nothing but give clear feedback.
+  if (MasterList[idx].length <= 1) {
+    showItemsForSelectedCategory();
+    showNoList("No items to delete in: " + categoryName);
+    return;
+  }
+
+  MasterList[idx] = [MasterList[idx][0]];
   saveToStorage();
 
-  syncCategoryOptions();
+  // Refresh any screens that might be showing items for this category.
   showItemsForSelectedCategory();
   refreshEditScreenUI();
   refreshCategoryReportUI();
-  showNoList("All items deleted (categories kept).");
+
+  showNoList("Deleted all items in: " + categoryName);
 }
+
 
 function applyEdit() {
   const categoryName = normalize(getText("editCatChoice"));
